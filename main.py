@@ -47,7 +47,7 @@ class StateManager:
         self.active_timers = {}
         self.last_edit_time = {}
 
-def get_queue_lock(self, user_id: str) -> asyncio.Lock:
+    def get_queue_lock(self, user_id: str) -> asyncio.Lock:
         """Lock for serializing incoming files to prevent duplicate UI messages."""
         if user_id not in self._queue_locks:
             self._queue_locks[user_id] = asyncio.Lock()
@@ -91,6 +91,7 @@ try:
     logger.info("✅ MongoDB Indexes verified.")
 except Exception as e:
     logger.warning(f"⚠️ Could not verify MongoDB indexes: {e}")
+
 
 async def safe_db_call(func, *args, **kwargs) -> Any:
     """
@@ -143,6 +144,7 @@ async def safe_api_call(func, *args, **kwargs) -> Any:
             logger.error(f"⚠️ Error: {e}. Retrying ({attempt}/{retries})...")
             await asyncio.sleep(base_delay * attempt)
     return None
+
 # ==========================================
 # FILTERS & PERMISSIONS
 # ==========================================
@@ -190,7 +192,7 @@ async def add_channel_cmd(client, message):
             {"$set": {"channel_id": ch_id}}, 
             upsert=True
         )
-
+        
         await safe_api_call(message.reply_text, f"✅ **Channel Saved & Verified!**\nName: {ch_name}\nID: `{ch_id}`")
     except Exception as e:
         logger.error(f"Error in add_channel_cmd: {e}")
@@ -250,7 +252,7 @@ async def start_cmd(client, message):
         )
         return
 
-# Create empty state securely
+    # Create empty state securely
     await safe_db_call(
         user_states_col.update_one,
         {"_id": user_id},
@@ -325,7 +327,7 @@ async def handle_buttons(client, callback_query):
             await safe_api_call(callback_query.answer, "❌ Channel database mein nahi mila!", show_alert=True)
             return
 
-      await safe_db_call(
+        await safe_db_call(
             user_states_col.update_one,
             {"_id": user_id},
             {"$set": {
@@ -381,8 +383,21 @@ async def handle_buttons(client, callback_query):
                     from_chat_id=int(file_data["from_chat_id"]),
                     message_id=int(file_data["msg_id"])
                 )
-
-          # Protect API limits natively
+                
+                if is_copied:
+                    success_count += 1
+                else:
+                    failed_files.append(file_data)
+                    logger.warning(f"❌ Failed to copy msg_id {file_data['msg_id']}")
+                    
+                # Throttle UI updates to prevent FloodWait during massive batches
+                if index % 10 == 0 or index == total_files:
+                    await safe_api_call(
+                        callback_query.message.edit_text, 
+                        f"🚀 Live Progress: {index}/{total_files} files processed..."
+                    )
+                
+                # Protect API limits natively
                 await asyncio.sleep(1.2)
 
             # --- Phase 2: Final Fallback Rescue Loop ---
@@ -467,75 +482,4 @@ async def collect_batch(client, message):
     user_id = str(message.from_user.id)
     chat_id = message.chat.id
     
-    # STRICT ASYNC LOCK: Eliminates all race conditions for multiple forwarded files
-    queue_lock = state.get_queue_lock(user_id)
-    async with queue_lock:
-        u_state = await safe_db_call(user_states_col.find_one, {"_id": user_id})
-
-        if not u_state or not u_state.get("target_channel"):
-            await safe_api_call(message.reply_text, "⚠️ Kripya pehle `/start` dabakar target channel select karein!")
-            return
-
-        # Optimization: Limit increased to 500+ files as requested
-        files = u_state.get("files", [])
-        if len(files) >= 500:
-            await safe_api_call(
-                message.reply_text, 
-                "⚠️ Safety Limit! Aap ek baar mein maximum 500 files hi queue kar sakte hain. Pehle inhe 'Send' karein."
-            )
-            return
-
-        new_file_data = {
-            "msg_id": message.id,
-            "from_chat_id": message.chat.id
-        }
-        
-        # ATOMIC MONGODB UPDATE: Prevents duplicate files completely using $addToSet
-        update_result = await safe_db_call(
-            user_states_col.update_one,
-            {"_id": user_id},
-            {"$addToSet": {"files": new_file_data}}
-        )
-        
-        # If no modifications were made, it means the file was an exact duplicate. Skip UI update.
-        if update_result and update_result.modified_count == 0:
-            return
-            
-        total_queued = len(files) + 1
-        status_msg_id = u_state.get("status_msg_id")
-        
-        # 100% guarantee that only ONE queue status message exists
-        if not status_msg_id:
-            msg = await safe_api_call(message.reply_text, f"📥 Queueing files... ({total_queued})", quote=True)
-            if msg:
-                status_msg_id = msg.id
-                await safe_db_call(
-                    user_states_col.update_one,
-                    {"_id": user_id},
-                    {"$set": {"status_msg_id": status_msg_id}}
-                )
-        else:
-            # Edit the identical existing message. Throttle updates slightly to dodge FloodWait.
-            now = time.time()
-            # 2.5 seconds throttle provides much better protection for large batches (500+)
-            if now - state.last_edit_time.get(user_id, 0) > 2.5:
-                state.last_edit_time[user_id] = now
-                await safe_api_call(
-                    client.edit_message_text, 
-                    chat_id, 
-                    status_msg_id, 
-                    f"📥 Queueing files... ({total_queued})"
-                )
-
-    # Cancel old asyncio Tasks safely to prevent memory leaks and orphan tasks
-    if user_id in state.active_timers:
-        state.active_timers[user_id].cancel()
-    
-    # Register the clean debounce timer
-    state.active_timers[user_id] = asyncio.create_task(finalize_batch(client, chat_id, user_id))
-
-
-if __name__ == "__main__":
-    logger.info("🚀 Enterprise Production Bot started successfully!")
-    logger.info("🛡️ MongoDB Strict Atomic Integration & Race-Condition protection active.")
-    app.run()
+    # STRICT ASYNC LOCK: Eliminates all race conditions for
