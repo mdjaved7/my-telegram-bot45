@@ -22,7 +22,7 @@ from pyrogram.errors import (
 API_ID = "34801155"
 API_HASH = "d7846c4d0f2c343dd5b67c80d45409e8"
 BOT_TOKEN = "8273825894:AAHfGLIo0eXqdoZt-tdzXASTxMMWzt7A6qY"
-OWNER_ID = 123456789  # Apni sahi ID yahan daalein
+OWNER_ID = 6598432032  # Apni sahi ID yahan daalein
 MONGO_URI = "mongodb+srv://mybot:mdjaved11@cluster0.vi74rzf.mongodb.net/?appName=Cluster0" 
 
 logging.basicConfig(
