@@ -3,10 +3,11 @@ import json
 import os
 import time
 import asyncio
+import re
 
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from pyrogram.errors import FloodWait, PeerIdInvalid, ChatAdminRequired
+from pyrogram.errors import FloodWait, PeerIdInvalid, ChatAdminRequired, MessageNotModified
 
 # ---- CONFIGURATION ----
 API_ID = 34801155          
@@ -29,6 +30,18 @@ file_lock = asyncio.Lock()
 active_timers = {}
 last_edit_time = {}
 pending_status_creation = {}  # 🚀 Naya lock race conditions ko rokne ke liye
+
+# ---- CAPTION CLEANER HELPER ----
+def clean_caption(text):
+    if not text:
+        return ""
+    # Remove t.me links, http/https URLs, www links, and @usernames
+    text = re.sub(r'(https?://\S+|www\.\S+|t\.me/\S+|@\w+)', '', text)
+    # Remove multiple spaces
+    text = re.sub(r' +', ' ', text)
+    # Remove duplicate blank lines and trim whitespace
+    text = re.sub(r'\n\s*\n+', '\n', text).strip()
+    return text
 
 # ---- ASYNC JSON DATABASE SYSTEM ----
 def load_json(file_name, default_value):
@@ -263,15 +276,38 @@ async def handle_buttons(client, callback_query):
         success_count = 0
         failed_files = [] 
 
+        # --- Helper for processing single message sending ---
+        async def process_message_send(file_info):
+            # Fetch message to read its attributes/type safely
+            msg_obj = await client.get_messages(chat_id=int(file_info["from_chat_id"]), message_ids=int(file_info["msg_id"]))
+            if not msg_obj:
+                return None
+            
+            # Feature check: Perform link removal ONLY if the message type is Audio
+            if msg_obj.audio:
+                cleaned_caption_text = clean_caption(msg_obj.caption)
+                return await safe_api_call(
+                    client.send_audio,
+                    chat_id=target_chat_id,
+                    audio=msg_obj.audio.file_id,
+                    caption=cleaned_caption_text if cleaned_caption_text else None,
+                    duration=msg_obj.audio.duration,
+                    performer=msg_obj.audio.performer,
+                    title=msg_obj.audio.title
+                    # Thumbnail metadata is preserved inside file_id structure
+                )
+            else:
+                # Standard fallback for all other media categories
+                return await safe_api_call(
+                    client.copy_message,
+                    chat_id=target_chat_id,
+                    from_chat_id=int(file_info["from_chat_id"]),
+                    message_id=int(file_info["msg_id"])
+                )
+
         # --- Phase 1: Serial Execution Queue ---
         for index, file_data in enumerate(u_state["files"], 1):
-            # Using our secure universal wrapper directly instead of a nested custom retry
-            is_copied = await safe_api_call(
-                client.copy_message,
-                chat_id=target_chat_id,
-                from_chat_id=int(file_data["from_chat_id"]),
-                message_id=int(file_data["msg_id"])
-            )
+            is_copied = await process_message_send(file_data)
             
             if is_copied:
                 success_count += 1
@@ -289,12 +325,7 @@ async def handle_buttons(client, callback_query):
             await safe_api_call(callback_query.message.edit_text, f"🔄 Retrying failed items one final time ({len(failed_files)} remaining)...")
             still_failed = []
             for file_data in failed_files:
-                is_copied_final = await safe_api_call(
-                    client.copy_message,
-                    chat_id=target_chat_id,
-                    from_chat_id=int(file_data["from_chat_id"]),
-                    message_id=int(file_data["msg_id"])
-                )
+                is_copied_final = await process_message_send(file_data)
                 if not is_copied_final:
                     still_failed.append(file_data)
                 await asyncio.sleep(1.5)
@@ -410,4 +441,3 @@ async def collect_batch(client, message):
 if __name__ == "__main__":
     print("Core Production Bot started successfully with Advanced Anti-Flood Protections!")
     app.run()
-                
